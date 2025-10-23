@@ -1,203 +1,120 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useAppContext } from '../../context/AppContext';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { FileUploader } from '../ui/FileUploader';
 import { Loader } from '../ui/Loader';
-import { Slider } from '../ui/Slider';
-import { Tab } from '../../types';
-import { fetchTopicInfo, extractTextFromFile } from '../../services/geminiService';
 
-const MAX_TEXT_LENGTH = 100000;
+const MAX_TEXT_LENGTH = 100000; // 100k characters limit for direct input
 
 export const Ingest: React.FC = () => {
-  const { setIngestedText, setActiveTab, addNotification, language, llm } = useAppContext();
-  const [pastedText, setPastedText] = useState('');
-  const [fileNames, setFileNames] = useState<string[]>([]);
-  const [chunkWords, setChunkWords] = useState(800);
-  const [chunkOverlap, setChunkOverlap] = useState(250);
-  const [topic, setTopic] = useState('');
-  const [isSeeding, setIsSeeding] = useState(false);
-  const [isExtracting, setIsExtracting] = useState(false);
+  const { ingestText } = useAppContext();
+  const [text, setText] = useState('');
+  const [studyName, setStudyName] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
-  const acceptedMimeTypes = {
-    'application/pdf': ['.pdf'],
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-    'text/plain': ['.txt'],
+  const handleFileRead = (fileContent: string, fileName: string) => {
+    setText(fileContent.substring(0, MAX_TEXT_LENGTH));
+    setStudyName(fileName.split('.').slice(0, -1).join('.'));
+    if (fileContent.length > MAX_TEXT_LENGTH) {
+      addNotification(`File was truncated to ${MAX_TEXT_LENGTH} characters.`, 'info');
+    }
   };
-
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
+  
+  const onFileUpload = useCallback((files: File[]) => {
+    const file = files[0];
+    if (file) {
+      setIsLoading(true);
       const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        const base64String = (reader.result as string).split(',')[1];
-        resolve(base64String);
-      };
-      reader.onerror = error => reject(error);
-    });
-  };
-
-  // 📄 Handle file upload and extraction
-  const handleFilesUpload = async (files: File[]) => {
-    setFileNames(files.map(f => f.name));
-    setPastedText('');
-    setIsExtracting(true);
-
-    const fileProcessingPromises = files.map(file => {
-      return new Promise<string>(async (resolve, reject) => {
+      reader.onload = (e) => {
         try {
-          let fileText = '';
-          if (file.type === 'text/plain') {
-            fileText = await new Promise<string>((res, rej) => {
-              const reader = new FileReader();
-              reader.onload = (e) => res(e.target?.result as string);
-              reader.onerror = () => rej(new Error(`Failed to read ${file.name}.`));
-              reader.readAsText(file);
-            });
-          } else if (
-            file.type === 'application/pdf' ||
-            file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-          ) {
-            const base64Data = await fileToBase64(file);
-            fileText = await extractTextFromFile(llm, base64Data, file.type);
-          } else {
-            addNotification(`Skipping unsupported file type: ${file.name}.`, 'info');
-            resolve('');
-            return;
-          }
-
-          if (fileText.length > MAX_TEXT_LENGTH) {
-            fileText = fileText.substring(0, MAX_TEXT_LENGTH);
-            addNotification(`File ${file.name} was truncated to ${MAX_TEXT_LENGTH} characters.`, 'info');
-          }
-
-          resolve(`\n\n--- START OF FILE: ${file.name} ---\n\n${fileText}\n\n--- END OF FILE: ${file.name} ---\n\n`);
-        } catch (e: any) {
-          reject(e);
+          const fileContent = e.target?.result as string;
+          handleFileRead(fileContent, file.name);
+        } catch (error) {
+          addNotification('Could not read the file.');
+        } finally {
+            setIsLoading(false);
         }
-      });
-    });
-
-    try {
-      const allTextContents = await Promise.all(fileProcessingPromises);
-      setPastedText(allTextContents.join('').trim());
-    } catch (e: any) {
-      addNotification(e.message);
-    } finally {
-      setIsExtracting(false);
+      };
+      reader.onerror = () => {
+        addNotification('Error reading file.');
+        setIsLoading(false);
+      };
+      reader.readAsText(file);
     }
-  };
+  }, []);
 
-  // 🤖 Auto-seed topic
-  const handleAutoSeed = async () => {
-    if (!topic.trim()) {
-      addNotification('Please enter a topic to auto-seed.', 'info');
+  const handleCreateStudy = async () => {
+    if (!studyName.trim() || !text.trim()) {
+      addNotification('Please provide a name and some text for your study.', 'info');
       return;
     }
-    setIsSeeding(true);
-    try {
-      const notes = await fetchTopicInfo(llm, topic, language);
-      setPastedText(notes);
-      setFileNames([`notes_on_${topic.replace(/\s+/g, '_')}.txt`]);
-    } catch (e: any) {
-      addNotification(e.message);
-    } finally {
-      setIsSeeding(false);
-    }
+    setIsLoading(true);
+    await ingestText(studyName, text);
+    // Reset state for next study
+    setText('');
+    setStudyName('');
+    setIsLoading(false);
   };
-
-  // 🚀 Handle final ingestion
-  const handleIngest = () => {
-    if (!pastedText.trim()) {
-      addNotification('Please upload a file or paste some text to ingest.', 'info');
-      return;
-    }
-    setIngestedText(pastedText);
-    setActiveTab(Tab.Summary);
-  };
+  
+  const { addNotification } = useAppContext();
 
   return (
-    <div className="space-y-8">
-      {/* 📂 File Upload */}
-      <Card title="Upload Notes (PDF / DOCX / TXT)">
-        <FileUploader
-          onFileUpload={handleFilesUpload}
-          acceptedMimeTypes={acceptedMimeTypes}
-          multiple={true}
-          unsupportedFormatError="Please upload PDF, DOCX, or TXT files."
-          onError={addNotification}
-        />
-        {isExtracting && (
-          <div className="flex items-center gap-2 text-slate-400 mt-2 text-sm p-2 bg-slate-900/50 rounded-md">
-            <Loader spinnerClassName="w-5 h-5" />
-            <span>Extracting text from {fileNames.length} file(s)...</span>
-          </div>
-        )}
-        {fileNames.length > 0 && !isExtracting && (
-          <div className="text-sm text-slate-400 mt-2">
-            <p className="font-semibold">Loaded file(s):</p>
-            <ul className="list-disc list-inside pl-2">
-              {fileNames.map(name => <li key={name}>{name}</li>)}
-            </ul>
-          </div>
-        )}
-      </Card>
-
-      {/* 🤖 Auto-seed Topic */}
-      <Card>
-        <div className="flex flex-col sm:flex-row items-center gap-4">
-          <input
+    <Card title="Start a New Study">
+      <div className="space-y-6">
+        <p className="text-slate-400">
+          Provide your study material below by pasting text directly, or by uploading a plain text file.
+        </p>
+        
+        <input
             type="text"
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="Or enter a topic to auto-generate notes..."
+            value={studyName}
+            onChange={(e) => setStudyName(e.target.value)}
+            placeholder="Give your study a name (e.g., 'Chapter 5: Cell Biology')"
             className="w-full bg-slate-900 border border-slate-700 rounded-md p-3 text-slate-300 focus:ring-2 focus:ring-red-500 focus:outline-none transition"
-            disabled={isSeeding}
-          />
-          <Button onClick={handleAutoSeed} disabled={!topic.trim() || isSeeding} className="w-full sm:w-auto flex-shrink-0">
-            {isSeeding ? 'Generating...' : 'Auto-seed'}
+            disabled={isLoading}
+        />
+
+        <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-slate-200">Option 1: Paste Text</h3>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value.substring(0, MAX_TEXT_LENGTH))}
+              placeholder="Paste your notes, article, or any text here..."
+              className="w-full h-48 bg-slate-900 border border-slate-700 rounded-md p-3 text-slate-300 focus:ring-2 focus:ring-red-500 focus:outline-none transition resize-y"
+              disabled={isLoading}
+            />
+             <p className="text-right text-sm text-slate-500">{text.length} / {MAX_TEXT_LENGTH}</p>
+        </div>
+        
+        <div className="flex items-center gap-4">
+            <hr className="flex-grow border-slate-700" />
+            <span className="text-slate-500 font-semibold">OR</span>
+            <hr className="flex-grow border-slate-700" />
+        </div>
+
+        <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-slate-200">Option 2: Upload File</h3>
+            <FileUploader 
+                onFileUpload={onFileUpload} 
+                acceptedMimeTypes={{ 'text/plain': ['.txt'] }}
+                multiple={false}
+                onError={addNotification}
+                unsupportedFormatError="Only .txt files are supported for now."
+            />
+        </div>
+
+        <div className="pt-4 border-t border-slate-700/50">
+          <Button onClick={handleCreateStudy} disabled={!text.trim() || !studyName.trim() || isLoading} className="w-full sm:w-auto">
+            {isLoading ? (
+                <div className="flex items-center gap-2">
+                    <Loader spinnerClassName="w-5 h-5" />
+                    <span>Processing...</span>
+                </div>
+            ) : 'Create Study & Analyze'}
           </Button>
         </div>
-      </Card>
-
-      {/* 📝 Paste Text */}
-      <div className="flex items-center space-x-4">
-        <hr className="flex-grow border-slate-700" />
-        <span className="text-slate-400 text-sm">Or paste notes manually</span>
-        <hr className="flex-grow border-slate-700" />
       </div>
-
-      <Card>
-        <textarea
-          value={pastedText}
-          onChange={(e) => setPastedText(e.target.value.substring(0, MAX_TEXT_LENGTH))}
-          placeholder="Paste your study notes here..."
-          className="w-full h-48 bg-slate-900 border border-slate-700 rounded-md p-3 text-slate-300 focus:ring-2 focus:ring-red-500 focus:outline-none transition resize-y"
-          disabled={isSeeding || isExtracting}
-        />
-        <p className="text-right text-sm text-slate-500 mt-1">
-          {pastedText.length} / {MAX_TEXT_LENGTH}
-        </p>
-      </Card>
-
-      {/* ⚙️ Chunking Controls */}
-      <Card>
-        <div className="space-y-6">
-          <Slider label="Chunk size (words)" min={200} max={1200} value={chunkWords} onChange={setChunkWords} />
-          <Slider label="Chunk overlap" min={0} max={400} value={chunkOverlap} onChange={setChunkOverlap} />
-          <div className="pt-2">
-            <Button onClick={handleIngest} disabled={!pastedText.trim() || isExtracting || isSeeding}>
-              {(isExtracting || isSeeding) ? (
-                <div className="flex items-center gap-2">
-                  <Loader spinnerClassName="w-5 h-5" />
-                  <span>Processing...</span>
-                </div>
-              ) : 'Ingest & Build Index'}
-            </Button>
-          </div>
-        </div>
-      </Card>
-    </div>
+    </Card>
   );
 };
